@@ -36,8 +36,36 @@ async function verifyToken(req, res, next) {
   }
 }
 
+// Le rôle (comptable/direction/administrateur/auditeur) n'existe que dans Firestore, pas dans le
+// token Firebase — on va le chercher pour pouvoir restreindre les routes sensibles ci-dessous.
+// Sans ça, n'importe quel utilisateur authentifié pouvait appeler directement l'API (suppression de
+// dossiers, modification des tarifs...) même si l'interface lui masque ces boutons.
+async function chargerRole(req, res, next) {
+  try {
+    const doc = await admin.firestore().collection('users').doc(req.user.uid).get();
+    req.user.role = doc.exists ? (doc.data().role || 'auditeur') : 'auditeur';
+    next();
+  } catch (error) {
+    console.error('Erreur récupération rôle:', error);
+    return res.status(500).json({ error: 'Impossible de vérifier les droits de l\'utilisateur' });
+  }
+}
+
+function requireRole(...rolesAutorises) {
+  return (req, res, next) => {
+    if (!rolesAutorises.includes(req.user.role)) {
+      return res.status(403).json({ error: 'Action non autorisée pour votre rôle' });
+    }
+    next();
+  };
+}
+
+const PEUT_GERER_DOSSIERS = ['comptable', 'direction', 'administrateur'];
+const PEUT_SUPPRIMER = ['direction', 'administrateur'];
+const PEUT_GERER_CATALOGUE = ['administrateur', 'direction'];
+
 // Application du middleware sur toutes les routes API
-app.use('/api', verifyToken);
+app.use('/api', verifyToken, chargerRole);
 
 // Route : récupération de tous les épisodes
 app.get('/api/episodes', async (req, res) => {
@@ -50,7 +78,7 @@ app.get('/api/episodes', async (req, res) => {
 });
 
 // Route : création d'un épisode
-app.post('/api/episodes', async (req, res) => {
+app.post('/api/episodes', requireRole(...PEUT_GERER_DOSSIERS), async (req, res) => {
   const { data, error } = await supabase
     .from('episodes')
     .insert(req.body)
@@ -60,7 +88,7 @@ app.post('/api/episodes', async (req, res) => {
 });
 
 // Route : mise à jour d'un épisode
-app.put('/api/episodes/:id', async (req, res) => {
+app.put('/api/episodes/:id', requireRole(...PEUT_GERER_DOSSIERS), async (req, res) => {
   const { id } = req.params;
   const { data, error } = await supabase
     .from('episodes')
@@ -72,7 +100,7 @@ app.put('/api/episodes/:id', async (req, res) => {
 });
 
 // Route : suppression d'un épisode
-app.delete('/api/episodes/:id', async (req, res) => {
+app.delete('/api/episodes/:id', requireRole(...PEUT_SUPPRIMER), async (req, res) => {
   const { id } = req.params;
   const { error } = await supabase.from('episodes').delete().eq('id', id);
   if (error) return res.status(500).json({ error: error.message });
@@ -92,7 +120,7 @@ app.get('/api/catalog/:type', async (req, res) => {
 });
 
 // Route : mise à jour du catalogue
-app.put('/api/catalog/:type', async (req, res) => {
+app.put('/api/catalog/:type', requireRole(...PEUT_GERER_CATALOGUE), async (req, res) => {
   const { type } = req.params;
   const { items } = req.body;
   const { error } = await supabase
@@ -114,7 +142,7 @@ app.get('/api/paiements', async (req, res) => {
 });
 
 // Route : création d'un paiement
-app.post('/api/paiements', async (req, res) => {
+app.post('/api/paiements', requireRole(...PEUT_GERER_DOSSIERS), async (req, res) => {
   const { data, error } = await supabase
     .from('paiements')
     .insert(req.body)
