@@ -48,11 +48,14 @@ async function chargerRole(req, res, next) {
   try {
     const doc = await admin.firestore().collection('users').doc(req.user.uid).get();
     req.user.role = doc.exists ? (doc.data().role || 'auditeur') : 'auditeur';
-    next();
   } catch (error) {
-    console.error('Erreur récupération rôle:', error);
-    return res.status(500).json({ error: 'Impossible de vérifier les droits de l\'utilisateur' });
+    // Panne Firestore (ex: identifiants Google absents sur cet hébergeur) -- ne bloque plus TOUTE
+    // l'API : on retombe sur le rôle le moins privilégié (lecture seule) plutôt qu'un 500 général,
+    // le temps de configurer les identifiants Firebase Admin correctement sur Render.
+    console.error('Erreur récupération rôle (accès en lecture seule appliqué) :', error.message);
+    req.user.role = 'auditeur';
   }
+  next();
 }
 
 function requireRole(...rolesAutorises) {
