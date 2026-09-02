@@ -4,9 +4,12 @@ const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const admin = require('firebase-admin');
 
-// Initialisation de Firebase Admin pour la vérification des tokens
+// Initialisation de Firebase Admin pour la vérification des tokens. applicationDefault() ne
+// fonctionne que sur l'infrastructure Google -- sur Render, il faut fournir explicitement les
+// identifiants du compte de service (téléchargés depuis Firebase Console, stockés uniquement en
+// variable d'environnement, jamais committés).
 admin.initializeApp({
-  credential: admin.credential.applicationDefault(),
+  credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON)),
   projectId: 'chf-verification'
 });
 
