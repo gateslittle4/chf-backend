@@ -11,9 +11,13 @@ admin.initializeApp({
 });
 
 const app = express();
+// service_role (pas anon) : le backend a besoin d'un accès complet à la base, et c'est LUI qui
+// vérifie les droits (voir verifyToken/requireRole ci-dessous) -- Supabase RLS est activé sans
+// policy pour anon/authenticated, donc la clé anon (potentiellement exposée un jour) ne pourrait
+// plus rien lire ni modifier directement, en contournant cette vérification.
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_ANON_KEY
+  process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
 app.use(cors());
