@@ -72,7 +72,7 @@ function requireRole(...rolesAutorises) {
 
 const PEUT_GERER_DOSSIERS = ['comptable', 'direction', 'administrateur'];
 const PEUT_SUPPRIMER = ['direction', 'administrateur'];
-const PEUT_GERER_CATALOGUE = ['administrateur', 'direction'];
+const PEUT_GERER_CATALOGUE = ['administrateur', 'direction', 'comptable'];
 
 // Application du middleware sur toutes les routes API
 app.use('/api', verifyToken, chargerRole);
