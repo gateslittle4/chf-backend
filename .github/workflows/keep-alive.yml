@@ -1,0 +1,22 @@
+name: Garder le backend éveillé
+
+# Render (offre gratuite) endort ce service après 15 min d'inactivité, ce qui provoque un délai
+# de 30-60s (et des incidents hors ligne côté app CHF) au premier appel après la pause. On ping
+# la route publique /health toutes les 10 min pour ne jamais laisser passer ce délai -- gratuit
+# et sans dépendre d'un service tiers, ce dépôt étant public (minutes GitHub Actions illimitées).
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping /health
+        run: |
+          code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 60 https://chf-backend.onrender.com/health)
+          echo "Réponse : $code"
+          if [ "$code" != "200" ]; then
+            echo "::warning::/health a répondu $code au lieu de 200"
+          fi
