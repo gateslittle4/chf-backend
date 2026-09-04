@@ -26,11 +26,11 @@ const supabase = createClient(
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// Route de "réveil" publique (sans authentification) : appelée périodiquement par un ping externe
-// pour empêcher Render (offre gratuite) de mettre ce service en veille après 15 min d'inactivité,
-// ce qui causait les 30-60s de délai (et les incidents hors ligne côté app) au premier appel après
-// une pause. Volontairement en dehors de /api pour ne réveiller que le serveur, sans solliciter
-// Firebase ni Supabase à chaque ping.
+// Route de vérification publique (sans authentification) : répond juste que le processus tourne,
+// sans solliciter Firebase ni Supabase. Volontairement en dehors de /api, utile pour un contrôle
+// manuel ou par un outil de supervision -- ne PAS y brancher de ping automatique fréquent : les
+// heures d'exécution du plan gratuit Render sont limitées par mois pour tout le compte, et
+// empêcher la mise en veille consommerait ce quota bien plus vite qu'une utilisation normale.
 app.get('/health', (req, res) => res.status(200).json({ status: 'ok' }));
 
 // Middleware de vérification du token JWT Firebase
