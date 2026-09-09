@@ -65,6 +65,10 @@ async function chargerRole(req, res, next) {
     console.error('Erreur récupération rôle (accès en lecture seule appliqué) :', error.message);
     req.user.role = 'auditeur';
   }
+  // Esdras (propriétaire du compte) : toujours administrateur, même si Firestore est injoignable
+  // ou que son rôle n'y est pas encore configuré -- évite qu'une panne Firestore ou un oubli de
+  // configuration ne le fasse tomber en lecture seule (auditeur) sur sa propre application.
+  if (req.user.email === 'gateslittle4@gmail.com') req.user.role = 'administrateur';
   next();
 }
 
