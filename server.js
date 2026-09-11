@@ -172,6 +172,42 @@ app.post('/api/paiements', requireRole(...PEUT_GERER_DOSSIERS), async (req, res)
   res.status(201).json(data[0]);
 });
 
+// Journal d'audit — miroir Postgres du journal Firestore (voir enregistrerAudit dans
+// chf-demo2/api/firebase.js) : double écriture, rien n'est retiré de Firestore. Permet de
+// consulter les événements (ajout à un lot, génération de lot, suppression...) directement
+// depuis cette base, sans dépendre d'un accès Firestore séparé.
+const PEUT_LIRE_AUDIT = ['administrateur', 'direction', 'auditeur'];
+
+// Route : ajout d'un événement au journal d'audit. Tout utilisateur authentifié peut écrire
+// (c'est le journal de SES propres actions) -- l'identité vient du token vérifié, jamais du
+// corps de la requête, pour qu'on ne puisse pas usurper "effectué par" un autre compte.
+app.post('/api/audit', async (req, res) => {
+  const { action, details } = req.body;
+  if (!action) return res.status(400).json({ error: 'action manquante' });
+  const { data, error } = await supabase
+    .from('audit_log')
+    .insert({
+      action,
+      details: details || {},
+      effectue_par: req.user.name || req.user.email || 'inconnu',
+      effectue_par_uid: req.user.uid
+    })
+    .select();
+  if (error) return res.status(500).json({ error: error.message });
+  res.status(201).json(data[0]);
+});
+
+// Route : lecture du journal d'audit -- réservée aux rôles qui doivent pouvoir le consulter.
+app.get('/api/audit', requireRole(...PEUT_LIRE_AUDIT), async (req, res) => {
+  const { data, error } = await supabase
+    .from('audit_log')
+    .select('*')
+    .order('date', { ascending: false })
+    .limit(500);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`Backend CHF demarré sur le port ${PORT}`);
