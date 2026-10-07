@@ -108,12 +108,21 @@ app.post('/api/episodes', requireRole(...PEUT_GERER_DOSSIERS), async (req, res) 
   res.status(201).json(data[0]);
 });
 
-// Route : mise à jour d'un épisode
+// Route : mise à jour d'un épisode. Trace systématiquement QUI modifie ce dossier -- l'identité
+// vient du token vérifié (jamais du corps de la requête, pour qu'on ne puisse pas l'usurper),
+// et écrase toute valeur modifie_par/modifie_par_uid que le client aurait pu envoyer. Couvre
+// TOUTE écriture sur un dossier (sauvegarde de fiche, archivage, suspension, report, renommage...)
+// sans dépendre de chaque endroit du frontend qui pense à le faire lui-même.
 app.put('/api/episodes/:id', requireRole(...PEUT_GERER_DOSSIERS), async (req, res) => {
   const { id } = req.params;
+  const payload = {
+    ...req.body,
+    modifie_par: req.user.name || req.user.email || 'inconnu',
+    modifie_par_uid: req.user.uid
+  };
   const { data, error } = await supabase
     .from('episodes')
-    .update(req.body)
+    .update(payload)
     .eq('id', id)
     .select();
   if (error) return res.status(500).json({ error: error.message });
