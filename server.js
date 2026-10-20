@@ -217,6 +217,37 @@ app.get('/api/audit', requireRole(...PEUT_LIRE_AUDIT), async (req, res) => {
   res.json(data);
 });
 
+// Route : changement du mot de passe d'un utilisateur (compte Firebase) -- réservée aux
+// administrateurs. Firebase ne permet pas à un navigateur de changer le mot de passe d'un AUTRE
+// compte : seul le SDK Admin (ici, côté serveur) le peut. Le mot de passe n'est ni enregistré ni
+// écrit dans le journal d'audit, seulement le fait que l'action a eu lieu et sur quel compte.
+app.put('/api/users/:uid/password', requireRole('administrateur'), async (req, res) => {
+  const { uid } = req.params;
+  const { password } = req.body || {};
+  if (typeof password !== 'string' || password.length < 8) {
+    return res.status(400).json({ error: 'Mot de passe : 8 caractères minimum.' });
+  }
+  try {
+    await admin.auth().updateUser(uid, { password });
+    // Déconnecte les autres appareils de ce compte : l'ancien mot de passe ne doit plus servir.
+    // Pas pour son propre compte, pour ne pas se déconnecter soi-même en plein travail.
+    if (uid !== req.user.uid) await admin.auth().revokeRefreshTokens(uid);
+  } catch (error) {
+    console.error('Erreur changement de mot de passe :', error.code || error.message);
+    if (error.code === 'auth/user-not-found') return res.status(404).json({ error: 'Utilisateur introuvable.' });
+    if (error.code === 'auth/invalid-password') return res.status(400).json({ error: 'Mot de passe refusé : trop faible ou invalide.' });
+    return res.status(500).json({ error: 'Impossible de changer le mot de passe pour le moment.' });
+  }
+  const { error: erreurAudit } = await supabase.from('audit_log').insert({
+    action: 'changement_mot_de_passe',
+    details: { utilisateurCible: uid },
+    effectue_par: req.user.name || req.user.email || 'inconnu',
+    effectue_par_uid: req.user.uid
+  });
+  if (erreurAudit) console.error('Audit du changement de mot de passe non enregistré :', erreurAudit.message);
+  res.json({ success: true });
+});
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`Backend CHF demarré sur le port ${PORT}`);
