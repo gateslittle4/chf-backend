@@ -3,6 +3,9 @@ const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const admin = require('firebase-admin');
+const {
+  tamponnerFiches, diffCatalogue, auditCreationDossier, auditModificationDossier, auditSuppressionDossier
+} = require('./audit');
 
 // Initialisation de Firebase Admin pour la vérification des tokens. applicationDefault() ne
 // fonctionne que sur l'infrastructure Google -- sur Render, il faut fournir explicitement les
@@ -98,42 +101,107 @@ app.get('/api/episodes', async (req, res) => {
   res.json(data);
 });
 
+// --- Traçabilité : le serveur note lui-même QUI crée, modifie ou supprime un dossier, une fiche, le
+// catalogue ou un paiement. L'identité vient toujours du token vérifié (jamais du corps de la
+// requête, pour qu'on ne puisse pas l'usurper), et rien ne dépend du navigateur qui "pense" à
+// journaliser. Détail des comparaisons avant/après : audit.js.
+const acteurDe = (req) => ({ nom: req.user.name || req.user.email || 'inconnu', uid: req.user.uid });
+
+// Écrit des lignes dans audit_log. Ne fait JAMAIS échouer la requête principale : une panne du
+// journal ne doit pas empêcher d'enregistrer un patient ou une facture, mais elle est écrite dans
+// les journaux du serveur pour qu'on la voie.
+async function journaliser(req, lignes) {
+  if (!lignes || lignes.length === 0) return;
+  try {
+    const { nom, uid } = acteurDe(req);
+    const { error } = await supabase.from('audit_log').insert(
+      lignes.map(l => ({ action: l.action, details: l.details, effectue_par: nom, effectue_par_uid: uid }))
+    );
+    if (error) console.error('Audit non enregistré :', error.message);
+  } catch (e) { console.error('Audit non enregistré :', e.message); }
+}
+
+// Lecture de l'état AVANT une écriture (pour comparer). undefined = lecture impossible (on ne
+// doit alors ni tamponner les fiches ni comparer, sous peine de les attribuer à tort à la
+// personne qui sauvegarde) ; null = dossier introuvable.
+async function lireDossier(id) {
+  try {
+    const { data, error } = await supabase.from('episodes').select('*').eq('id', id).maybeSingle();
+    if (error) { console.error('Lecture du dossier avant écriture impossible :', error.message); return undefined; }
+    return data || null;
+  } catch (e) { console.error('Lecture du dossier avant écriture impossible :', e.message); return undefined; }
+}
+
 // Route : création d'un épisode
 app.post('/api/episodes', requireRole(...PEUT_GERER_DOSSIERS), async (req, res) => {
+  const acteur = acteurDe(req);
+  const maintenant = new Date().toISOString();
+  const estListe = Array.isArray(req.body);
+  const aInserer = (estListe ? req.body : [req.body]).map(l => (
+    l && Array.isArray(l.fiches)
+      ? { ...l, fiches: tamponnerFiches([], l.fiches, acteur, maintenant), modifie_par: acteur.nom, modifie_par_uid: acteur.uid }
+      : l
+  ));
   const { data, error } = await supabase
     .from('episodes')
-    .insert(req.body)
+    .insert(estListe ? aInserer : aInserer[0])
     .select();
   if (error) return res.status(500).json({ error: error.message });
+  await journaliser(req, data.flatMap(auditCreationDossier));
   res.status(201).json(data[0]);
 });
 
-// Route : mise à jour d'un épisode. Trace systématiquement QUI modifie ce dossier -- l'identité
-// vient du token vérifié (jamais du corps de la requête, pour qu'on ne puisse pas l'usurper),
-// et écrase toute valeur modifie_par/modifie_par_uid que le client aurait pu envoyer. Couvre
-// TOUTE écriture sur un dossier (sauvegarde de fiche, archivage, suspension, report, renommage...)
-// sans dépendre de chaque endroit du frontend qui pense à le faire lui-même.
+// Route : mise à jour d'un épisode. Trace systématiquement QUI modifie ce dossier (modifie_par) et
+// chaque fiche (creePar / modifiePar), et écrit dans audit_log ce qui a changé : champs du dossier,
+// fiches ajoutées / modifiées (lignes ajoutées, retirées, prix changés) / supprimées. Couvre TOUTE
+// écriture sur un dossier (sauvegarde de fiche, archivage, suspension, report, renommage, lot...).
 app.put('/api/episodes/:id', requireRole(...PEUT_GERER_DOSSIERS), async (req, res) => {
   const { id } = req.params;
-  const payload = {
-    ...req.body,
-    modifie_par: req.user.name || req.user.email || 'inconnu',
-    modifie_par_uid: req.user.uid
-  };
+  const acteur = acteurDe(req);
+  const avant = await lireDossier(id);
+  const payload = { ...req.body, modifie_par: acteur.nom, modifie_par_uid: acteur.uid };
+  if (avant && Array.isArray(payload.fiches)) {
+    payload.fiches = tamponnerFiches(avant.fiches, payload.fiches, acteur, new Date().toISOString());
+  }
   const { data, error } = await supabase
     .from('episodes')
     .update(payload)
     .eq('id', id)
     .select();
   if (error) return res.status(500).json({ error: error.message });
-  res.json(data[0] || {});
+  const apres = data[0];
+  if (avant && apres) await journaliser(req, auditModificationDossier(avant, apres, req.body));
+  else if (apres) await journaliser(req, [{ action: 'dossier_modifie', details: { dossierId: id, nomPatient: apres.nom_patient, ongPartenaire: apres.ong_partenaire, comparaisonIndisponible: true } }]);
+  res.json(apres || {});
 });
 
-// Route : suppression d'un épisode
+// Route : suppression d'un épisode. Une copie complète du dossier (toutes ses fiches) est gardée
+// dans episodes_supprimes AVANT l'effacement, pour pouvoir dire qui l'a supprimé, quand, et le
+// restaurer. Si cette copie échoue, la suppression a quand même lieu (on ne bloque pas le travail)
+// mais la copie est alors placée dans le journal d'audit pour ne rien perdre.
 app.delete('/api/episodes/:id', requireRole(...PEUT_SUPPRIMER), async (req, res) => {
   const { id } = req.params;
+  const acteur = acteurDe(req);
+  const avant = await lireDossier(id);
+  let copieConservee = false;
+  if (avant) {
+    const { error: erreurCopie } = await supabase.from('episodes_supprimes').insert({
+      episode_id: avant.id, nom_patient: avant.nom_patient, ong_partenaire: avant.ong_partenaire,
+      snapshot: avant, supprime_par: acteur.nom, supprime_par_uid: acteur.uid
+    });
+    if (erreurCopie) console.error('Copie du dossier supprimé non enregistrée :', erreurCopie.message);
+    else copieConservee = true;
+  }
   const { error } = await supabase.from('episodes').delete().eq('id', id);
   if (error) return res.status(500).json({ error: error.message });
+  if (avant) {
+    const lignes = auditSuppressionDossier(avant);
+    lignes[0].details.copieConservee = copieConservee;
+    if (!copieConservee) lignes[0].details.copieDansAudit = avant;
+    await journaliser(req, lignes);
+  } else {
+    await journaliser(req, [{ action: 'dossier_supprime', details: { dossierId: id, dossierIntrouvable: true } }]);
+  }
   res.json({ success: true });
 });
 
@@ -149,15 +217,31 @@ app.get('/api/catalog/:type', async (req, res) => {
   res.json(data?.items || []);
 });
 
-// Route : mise à jour du catalogue
+// Route : mise à jour du catalogue. Note dans audit_log les articles ajoutés / retirés et les
+// changements de nom, de prix ou de "nouveau prix" (pas le stock, qui bouge à chaque vente).
 app.put('/api/catalog/:type', requireRole(...PEUT_GERER_CATALOGUE), async (req, res) => {
   const { type } = req.params;
   const { items } = req.body;
+  let avantItems;
+  try {
+    const { data } = await supabase.from('catalog').select('items').eq('type', type).maybeSingle();
+    avantItems = data ? data.items : undefined;
+  } catch (e) { console.error('Lecture du catalogue avant écriture impossible :', e.message); }
   const { error } = await supabase
     .from('catalog')
     .update({ items, updated_at: new Date().toISOString() })
     .eq('type', type);
   if (error) return res.status(500).json({ error: error.message });
+  if (Array.isArray(avantItems) && Array.isArray(items)) {
+    const { ajoutes, supprimes, modifies } = diffCatalogue(avantItems, items);
+    if (ajoutes.length || supprimes.length || modifies.length) {
+      await journaliser(req, [{ action: 'catalogue_modifie', details: {
+        catalogue: type,
+        ajoutes: ajoutes.slice(0, 50), supprimes: supprimes.slice(0, 50), modifies: modifies.slice(0, 50),
+        totalChangements: ajoutes.length + supprimes.length + modifies.length
+      } }]);
+    }
+  }
   res.json({ success: true });
 });
 
@@ -178,6 +262,10 @@ app.post('/api/paiements', requireRole(...PEUT_GERER_DOSSIERS), async (req, res)
     .insert(req.body)
     .select();
   if (error) return res.status(500).json({ error: error.message });
+  await journaliser(req, data.map(p => ({ action: 'paiement_enregistre', details: {
+    paiementId: p.id, dossierId: p.episode_id, nomPatient: p.patient_nom, montant: Number(p.montant) || 0,
+    mode: p.mode, ongPartenaire: p.ong_partenaire
+  } })));
   res.status(201).json(data[0]);
 });
 
