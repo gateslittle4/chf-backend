@@ -163,6 +163,14 @@ app.put('/api/episodes/:id', requireRole(...PEUT_GERER_DOSSIERS), async (req, re
   // modification est REFUSÉE (409) au lieu d'écraser en silence ce qui a été fait entre-temps. Sans ce champ
   // (ancienne version de l'appli encore ouverte, écritures partielles : lot, archivage...), rien ne change.
   const { expected_updated_at: versionAttendue, ...corps } = req.body || {};
+  // Mode strict (variable d'environnement EXIGER_VERSION_DOSSIER=1) : toute écriture de FICHES doit annoncer la
+  // version qu'elle modifie. Ça arrête aussi les anciennes versions de l'appli restées ouvertes (portable
+  // resté hors ligne, onglet oublié) dont les modifications en attente écraseraient sinon, au retour de la
+  // connexion, ce qui a été fait entre-temps : elles sont refusées, et l'appli les garde en quarantaine.
+  if (process.env.EXIGER_VERSION_DOSSIER === '1' && Array.isArray(corps.fiches) && !versionAttendue) {
+    await journaliser(req, [{ action: 'modification_refusee_sans_version', details: { dossierId: id, nombreFiches: corps.fiches.length } }]);
+    return res.status(409).json({ error: "Cette version de l'application est trop ancienne pour enregistrer des fiches en sécurité (elle pourrait écraser le travail fait ailleurs). Tes changements n'ont PAS été enregistrés : recharge la page (Ctrl+Maj+R), rouvre le dossier et refais-les.", conflit: true, versionRequise: true });
+  }
   const avant = await lireDossier(id);
   const payload = { ...corps, modifie_par: acteur.nom, modifie_par_uid: acteur.uid };
   if (avant && Array.isArray(payload.fiches)) {
