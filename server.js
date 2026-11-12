@@ -158,19 +158,33 @@ app.post('/api/episodes', requireRole(...PEUT_GERER_DOSSIERS), async (req, res) 
 app.put('/api/episodes/:id', requireRole(...PEUT_GERER_DOSSIERS), async (req, res) => {
   const { id } = req.params;
   const acteur = acteurDe(req);
+  // `expected_updated_at` : la version du dossier que le navigateur a ouverte. Si elle est fournie et que
+  // le dossier a changé depuis (autre navigateur, autre personne, correction faite côté serveur), la
+  // modification est REFUSÉE (409) au lieu d'écraser en silence ce qui a été fait entre-temps. Sans ce champ
+  // (ancienne version de l'appli encore ouverte, écritures partielles : lot, archivage...), rien ne change.
+  const { expected_updated_at: versionAttendue, ...corps } = req.body || {};
   const avant = await lireDossier(id);
-  const payload = { ...req.body, modifie_par: acteur.nom, modifie_par_uid: acteur.uid };
+  const payload = { ...corps, modifie_par: acteur.nom, modifie_par_uid: acteur.uid };
   if (avant && Array.isArray(payload.fiches)) {
     payload.fiches = tamponnerFiches(avant.fiches, payload.fiches, acteur, new Date().toISOString());
   }
-  const { data, error } = await supabase
-    .from('episodes')
-    .update(payload)
-    .eq('id', id)
-    .select();
+  // Mise à jour conditionnelle ATOMIQUE : "... WHERE id = ? AND updated_at = <version attendue>", donc même
+  // deux sauvegardes simultanées ne peuvent pas s'écraser (la seconde ne trouve plus la bonne version).
+  let requete = supabase.from('episodes').update(payload).eq('id', id);
+  if (versionAttendue) requete = requete.eq('updated_at', versionAttendue);
+  const { data, error } = await requete.select();
   if (error) return res.status(500).json({ error: error.message });
+  if (versionAttendue && (!data || data.length === 0)) {
+    const courant = await lireDossier(id);
+    const quand = courant && courant.updated_at ? new Date(courant.updated_at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Port-au-Prince' }) : null;
+    const message = courant
+      ? `Ce dossier a été modifié ailleurs${courant.modifie_par ? ` par ${courant.modifie_par}` : ''}${quand ? ` à ${quand}` : ''} depuis que tu l'as ouvert ici. Tes changements n'ont PAS été enregistrés : recharge la page pour voir la dernière version, puis refais-les.`
+      : "Ce dossier n'existe plus (supprimé ailleurs). Tes changements n'ont PAS été enregistrés.";
+    await journaliser(req, [{ action: 'modification_refusee_conflit', details: { dossierId: id, nomPatient: courant ? courant.nom_patient : null, versionAttendue, versionActuelle: courant ? courant.updated_at : null, modifieParActuel: courant ? courant.modifie_par : null } }]);
+    return res.status(409).json({ error: message, conflit: true, courant: courant ? { updated_at: courant.updated_at, modifie_par: courant.modifie_par } : null });
+  }
   const apres = data[0];
-  if (avant && apres) await journaliser(req, auditModificationDossier(avant, apres, req.body));
+  if (avant && apres) await journaliser(req, auditModificationDossier(avant, apres, corps));
   else if (apres) await journaliser(req, [{ action: 'dossier_modifie', details: { dossierId: id, nomPatient: apres.nom_patient, ongPartenaire: apres.ong_partenaire, comparaisonIndisponible: true } }]);
   res.json(apres || {});
 });
