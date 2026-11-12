@@ -26,7 +26,8 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-app.use(cors());
+// `Date` exposé : l'appli s'en sert pour mesurer l'écart entre l'horloge d'un portable et celle du serveur.
+app.use(cors({ exposedHeaders: ['Date'] }));
 app.use(express.json({ limit: '10mb' }));
 
 // Route de vérification publique (sans authentification) : répond juste que le processus tourne,
@@ -131,6 +132,15 @@ async function lireDossier(id) {
     return data || null;
   } catch (e) { console.error('Lecture du dossier avant écriture impossible :', e.message); return undefined; }
 }
+
+// Route : version (updated_at) d'un dossier, sans télécharger ses fiches -- l'appli s'en sert pour savoir si un
+// dossier a changé depuis qu'une modification hors ligne a été faite, avant de la rejouer.
+app.get('/api/episodes/:id/version', async (req, res) => {
+  const { data, error } = await supabase.from('episodes').select('id, updated_at, modifie_par').eq('id', req.params.id).maybeSingle();
+  if (error) return res.status(500).json({ error: error.message });
+  if (!data) return res.status(404).json({ error: 'Dossier introuvable' });
+  res.json(data);
+});
 
 // Route : création d'un épisode
 app.post('/api/episodes', requireRole(...PEUT_GERER_DOSSIERS), async (req, res) => {
