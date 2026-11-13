@@ -172,7 +172,10 @@ app.put('/api/episodes/:id', requireRole(...PEUT_GERER_DOSSIERS), async (req, re
   // le dossier a changé depuis (autre navigateur, autre personne, correction faite côté serveur), la
   // modification est REFUSÉE (409) au lieu d'écraser en silence ce qui a été fait entre-temps. Sans ce champ
   // (ancienne version de l'appli encore ouverte, écritures partielles : lot, archivage...), rien ne change.
-  const { expected_updated_at: versionAttendue, ...corps } = req.body || {};
+  const { expected_updated_at: versionDemandee, ...corps } = req.body || {};
+  // Le contrôle de version est DÉSACTIVÉ par défaut (il gênait la modification des fiches) : le champ envoyé par
+  // une page encore ouverte sur l'ancienne version est simplement ignoré. Pour le réactiver : CONTROLE_VERSION_DOSSIER=1.
+  const versionAttendue = process.env.CONTROLE_VERSION_DOSSIER === '1' ? versionDemandee : undefined;
   // Mode strict (variable d'environnement EXIGER_VERSION_DOSSIER=1) : toute écriture de FICHES doit annoncer la
   // version qu'elle modifie. Ça arrête aussi les anciennes versions de l'appli restées ouvertes (portable
   // resté hors ligne, onglet oublié) dont les modifications en attente écraseraient sinon, au retour de la
