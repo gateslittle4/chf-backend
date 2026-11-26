@@ -4,7 +4,7 @@ const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const admin = require('firebase-admin');
 const {
-  tamponnerFiches, diffCatalogue, auditCreationDossier, auditModificationDossier, auditSuppressionDossier
+  tamponnerFiches, diffCatalogue, fusionnerCatalogue, auditCreationDossier, auditModificationDossier, auditSuppressionDossier
 } = require('./audit');
 
 // Initialisation de Firebase Admin pour la vérification des tokens. applicationDefault() ne
@@ -252,30 +252,47 @@ app.get('/api/catalog/:type', async (req, res) => {
   res.json(data?.items || []);
 });
 
-// Route : mise à jour du catalogue. Note dans audit_log les articles ajoutés / retirés et les
-// changements de nom, de prix ou de "nouveau prix" (pas le stock, qui bouge à chaque vente).
+// Route : mise à jour du catalogue. Le navigateur envoie sa liste (`items`) ET la copie qu'il avait
+// chargée (`base`) : on FUSIONNE (voir fusionnerCatalogue) au lieu de remplacer en bloc, pour qu'un
+// navigateur resté ouvert ou une sauvegarde rejouée après coupure n'écrase jamais les changements
+// faits entre-temps par quelqu'un d'autre. Sans `base` (ancienne version de l'application encore
+// ouverte), l'envoi est refusé : mieux vaut une erreur visible qu'un écrasement silencieux.
+// Note dans audit_log les articles ajoutés / retirés et les changements de nom, de prix ou de
+// "nouveau prix" (pas le stock, qui bouge à chaque vente).
 app.put('/api/catalog/:type', requireRole(...PEUT_GERER_CATALOGUE), async (req, res) => {
   const { type } = req.params;
-  const { items } = req.body;
-  let avantItems;
-  try {
-    const { data } = await supabase.from('catalog').select('items').eq('type', type).maybeSingle();
-    avantItems = data ? data.items : undefined;
-  } catch (e) { console.error('Lecture du catalogue avant écriture impossible :', e.message); }
-  const { error } = await supabase
-    .from('catalog')
-    .update({ items, updated_at: new Date().toISOString() })
-    .eq('type', type);
-  if (error) return res.status(500).json({ error: error.message });
-  if (Array.isArray(avantItems) && Array.isArray(items)) {
-    const { ajoutes, supprimes, modifies } = diffCatalogue(avantItems, items);
-    if (ajoutes.length || supprimes.length || modifies.length) {
-      await journaliser(req, [{ action: 'catalogue_modifie', details: {
-        catalogue: type,
-        ajoutes: ajoutes.slice(0, 50), supprimes: supprimes.slice(0, 50), modifies: modifies.slice(0, 50),
-        totalChangements: ajoutes.length + supprimes.length + modifies.length
-      } }]);
+  const { items, base } = req.body;
+  if (!Array.isArray(items)) return res.status(400).json({ error: 'Catalogue invalide.' });
+  if (!Array.isArray(base)) {
+    return res.status(409).json({ error: "Version de l'application trop ancienne : ferme et rouvre le site (Ctrl+F5) puis recommence. Rien n'a été modifié." });
+  }
+  let avantItems, fusion;
+  for (let essai = 0; essai < 4; essai++) {
+    const { data, error: errLecture } = await supabase.from('catalog').select('items, updated_at').eq('type', type).maybeSingle();
+    if (errLecture) return res.status(500).json({ error: errLecture.message });
+    avantItems = data ? (data.items || []) : [];
+    fusion = fusionnerCatalogue(base, avantItems, items);
+    if (!data) {
+      const { error } = await supabase.from('catalog').insert({ type, items: fusion, updated_at: new Date().toISOString() });
+      if (error) return res.status(500).json({ error: error.message });
+      break;
     }
+    // Écriture conditionnelle : si quelqu'un a enregistré entre notre lecture et notre écriture,
+    // on relit et on refusionne (sinon on écraserait son changement).
+    let requete = supabase.from('catalog').update({ items: fusion, updated_at: new Date().toISOString() }).eq('type', type);
+    requete = data.updated_at == null ? requete.is('updated_at', null) : requete.eq('updated_at', data.updated_at);
+    const { data: lignes, error } = await requete.select('type');
+    if (error) return res.status(500).json({ error: error.message });
+    if (lignes && lignes.length > 0) break;
+    if (essai === 3) return res.status(409).json({ error: 'Le catalogue est modifié par quelqu\'un d\'autre en ce moment. Réessaie dans quelques secondes.' });
+  }
+  const { ajoutes, supprimes, modifies } = diffCatalogue(avantItems, fusion);
+  if (ajoutes.length || supprimes.length || modifies.length) {
+    await journaliser(req, [{ action: 'catalogue_modifie', details: {
+      catalogue: type,
+      ajoutes: ajoutes.slice(0, 50), supprimes: supprimes.slice(0, 50), modifies: modifies.slice(0, 50),
+      totalChangements: ajoutes.length + supprimes.length + modifies.length
+    } }]);
   }
   res.json({ success: true });
 });

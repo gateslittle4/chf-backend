@@ -196,7 +196,58 @@ function diffCatalogue(avantItems, apresItems) {
   return { ajoutes, supprimes, modifies };
 }
 
+// Fusion à trois voies d'un catalogue : `base` = la copie que le navigateur avait chargée,
+// `courant` = ce qui est en base MAINTENANT, `entrant` = ce que le navigateur envoie. On ne garde
+// de l'envoi que ce que la personne a RÉELLEMENT changé par rapport à sa copie ; tout le reste vient
+// de la base. Ainsi un navigateur resté ouvert (ou une sauvegarde mise en file hors ligne) ne peut
+// plus écraser les prix, ajouts ou suppressions faits entre-temps par quelqu'un d'autre.
+// Le stock (`quantite`) est fusionné en variation (ventes/achats), pas en valeur absolue.
+function fusionnerCatalogue(base, courant, entrant) {
+  const cle = (i) => String(i.id);
+  const mapDe = (liste) => new Map((liste || []).map(i => [cle(i), i]));
+  const mB = mapDe(base), mC = mapDe(courant), mE = mapDe(entrant);
+  const memeArticle = (a, b) => {
+    const champs = new Set([...Object.keys(a), ...Object.keys(b)]);
+    for (const f of champs) if (!memeValeur(a[f], b[f])) return false;
+    return true;
+  };
+  const fusionnerArticle = (b, c, e) => {
+    const r = { ...c };
+    const champs = new Set([...Object.keys(b || {}), ...Object.keys(e)]);
+    for (const f of champs) {
+      const avant = b ? b[f] : undefined;
+      if (memeValeur(e[f], avant)) continue; // pas touché par ce navigateur : on garde la base
+      if (f === 'quantite' && b && estNumerique(e[f]) && estNumerique(avant) && estNumerique(c[f])) {
+        r[f] = Number(c[f]) + (Number(e[f]) - Number(avant));
+      } else if (e[f] === undefined) delete r[f];
+      else r[f] = e[f];
+    }
+    return r;
+  };
+  const resultat = [];
+  for (const c of (courant || [])) {
+    const k = cle(c), b = mB.get(k), e = mE.get(k);
+    if (!e) {
+      // Retiré par ce navigateur : on ne supprime que si la base n'a pas bougé depuis sa copie.
+      if (b && memeArticle(b, c)) continue;
+      resultat.push(c);
+    } else if (!b) {
+      resultat.push({ ...c, ...e }); // ajouté des deux côtés avec le même id : l'envoi complète
+    } else {
+      resultat.push(fusionnerArticle(b, c, e));
+    }
+  }
+  for (const e of (entrant || [])) {
+    const k = cle(e);
+    if (mC.has(k)) continue;
+    const b = mB.get(k);
+    // Nouvel article de ce navigateur, ou article supprimé par un autre que ce navigateur a modifié.
+    if (!b || !memeArticle(b, e)) resultat.push(e);
+  }
+  return resultat;
+}
+
 module.exports = {
-  memeValeur, diffChamps, comparerFiches, tamponnerFiches, diffLignes, resumeFiche, diffCatalogue,
+  memeValeur, diffChamps, comparerFiches, tamponnerFiches, diffLignes, resumeFiche, diffCatalogue, fusionnerCatalogue,
   auditCreationDossier, auditModificationDossier, auditSuppressionDossier
 };
