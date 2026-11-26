@@ -201,7 +201,8 @@ function diffCatalogue(avantItems, apresItems) {
 // de l'envoi que ce que la personne a RÉELLEMENT changé par rapport à sa copie ; tout le reste vient
 // de la base. Ainsi un navigateur resté ouvert (ou une sauvegarde mise en file hors ligne) ne peut
 // plus écraser les prix, ajouts ou suppressions faits entre-temps par quelqu'un d'autre.
-// Le stock (`quantite`) est fusionné en variation (ventes/achats), pas en valeur absolue.
+// Le stock (`quantite`) reste une valeur absolue (la dernière saisie gagne) : une fusion en variation
+// doublait les écarts quand plusieurs envois se chevauchaient (incident du 26/11, stocks négatifs).
 function fusionnerCatalogue(base, courant, entrant) {
   const cle = (i) => String(i.id);
   const mapDe = (liste) => new Map((liste || []).map(i => [cle(i), i]));
@@ -217,9 +218,7 @@ function fusionnerCatalogue(base, courant, entrant) {
     for (const f of champs) {
       const avant = b ? b[f] : undefined;
       if (memeValeur(e[f], avant)) continue; // pas touché par ce navigateur : on garde la base
-      if (f === 'quantite' && b && estNumerique(e[f]) && estNumerique(avant) && estNumerique(c[f])) {
-        r[f] = Number(c[f]) + (Number(e[f]) - Number(avant));
-      } else if (e[f] === undefined) delete r[f];
+      if (e[f] === undefined) delete r[f];
       else r[f] = e[f];
     }
     return r;
